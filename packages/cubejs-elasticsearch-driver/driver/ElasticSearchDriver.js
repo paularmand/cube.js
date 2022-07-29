@@ -87,12 +87,31 @@ class ElasticSearchDriver extends BaseDriver {
 
   async query(query, values) {
     try {
-      const result = (await this.sqlClient.sql.query({ // TODO cursor
-        format: this.config.queryFormat,
-        body: {
-          query: SqlString.format(query, values)
+      // execute at least 1 query, and keep requesting results until the cursor is empty
+      var first = true;
+      var finalized = false;
+      var result;
+      var part;
+      do {
+        var body;
+        if (first) {
+            body = {query: SqlString.format(query, values)}
+            first = false;
+        } else {
+            body = {cursor: part.cursor}
         }
-      })).body;
+        part = (await this.sqlClient.sql.query({
+            format: this.config.queryFormat,
+            body: body
+        })).body;
+        if (result) {
+            result.rows.push(...part.rows);
+        } else {
+            result = part;
+        }
+        finalized = !(part && part.cursor);
+      }
+      while (!finalized);
 
       // INFO: cloud left in place for backward compatibility
       if (this.config.cloud || ['jdbc', 'json'].includes(this.config.queryFormat)) {
