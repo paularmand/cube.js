@@ -3,6 +3,38 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [0.30.45](https://github.com/cube-js/cube.js/compare/v0.30.44...v0.30.45) (2022-08-05)
+
+
+### Bug Fixes
+
+* **cubestore:** Support a space separated binary strings for varbinary fields in csv ([#5061](https://github.com/cube-js/cube.js/issues/5061)) ([c67793e](https://github.com/cube-js/cube.js/commit/c67793eb0aa772548cd6c05767be17cfe9a86d18))
+* **query-orchestrator:** API instance throw on missing partitions ([#5069](https://github.com/cube-js/cube.js/issues/5069)) ([7b16875](https://github.com/cube-js/cube.js/commit/7b16875ee204ddc9603dc2be900799d748facae1))
+* **query-orchestrator:** excessive buildRange queries ([d818611](https://github.com/cube-js/cube.js/commit/d8186116aa99247e20609db22a993dc0a548cfdf))
+
+
+### Features
+
+* **cubesql:** Support binary bitwise operators (>>, <<) ([7363879](https://github.com/cube-js/cube.js/commit/7363879184395b3c499f9b678da7152362226ea0))
+* **cubesql:** Support svv_tables table (Redshift) ([#5060](https://github.com/cube-js/cube.js/issues/5060)) ([d3ed3ac](https://github.com/cube-js/cube.js/commit/d3ed3aca798d41fe4e1919c9fde2f7610435168c))
+* max partitions per cube configuration ([4b3739c](https://github.com/cube-js/cube.js/commit/4b3739c65133316802bfb377dec9743365a99566))
+
+
+
+
+
+## [0.30.44](https://github.com/cube-js/cube.js/compare/v0.30.43...v0.30.44) (2022-08-01)
+
+
+### Bug Fixes
+
+* **cubesql:** Ignore IO's UnexpectedEof|BrokenPipe on handling error ([98deb73](https://github.com/cube-js/cube.js/commit/98deb7362bf772816af88173e6669bf486c328a9))
+* **server-core:** driverFactory results assertion ([5eaad01](https://github.com/cube-js/cube.js/commit/5eaad018a4150c1ab7d56f68f372ba681548d84d))
+
+
+
+
+
 ## [0.30.43](https://github.com/cube-js/cube.js/compare/v0.30.42...v0.30.43) (2022-07-28)
 
 

@@ -72,7 +72,7 @@ use self::{
 use crate::{
     compile::engine::df::scan::CubeScanOptions,
     sql::{
-        database_variables::{DatabaseVariable, DatabaseVariables},
+        database_variables::{DatabaseVariable, DatabaseVariablesToUpdate},
         dataframe,
         session::DatabaseProtocol,
         statement::{CastReplacer, ToTimestampReplacer, UdfWildcardArgReplacer},
@@ -2236,8 +2236,10 @@ WHERE `TABLE_SCHEMA` = '{}'",
     ) -> Result<QueryPlan, CompilationError> {
         let mut flags = StatusFlags::SERVER_STATE_CHANGED;
 
-        let mut session_columns_to_update: DatabaseVariables = DatabaseVariables::new();
-        let mut global_columns_to_update: DatabaseVariables = DatabaseVariables::new();
+        let mut session_columns_to_update =
+            DatabaseVariablesToUpdate::with_capacity(key_values.len());
+        let mut global_columns_to_update =
+            DatabaseVariablesToUpdate::with_capacity(key_values.len());
 
         match self.state.protocol {
             DatabaseProtocol::PostgreSQL => {
@@ -2267,14 +2269,11 @@ WHERE `TABLE_SCHEMA` = '{}'",
                         }
                     };
 
-                    session_columns_to_update.insert(
+                    session_columns_to_update.push(DatabaseVariable::system(
                         key_value.key.value.to_lowercase(),
-                        DatabaseVariable::system(
-                            key_value.key.value.to_lowercase(),
-                            ScalarValue::Utf8(Some(value.clone())),
-                            None,
-                        ),
-                    );
+                        ScalarValue::Utf8(Some(value.clone())),
+                        None,
+                    ));
                 }
             }
             DatabaseProtocol::MySQL => {
@@ -2325,24 +2324,18 @@ WHERE `TABLE_SCHEMA` = '{}'",
                         } else {
                             key_value.key.value.to_lowercase()
                         };
-                        global_columns_to_update.insert(
-                            key.clone(),
-                            DatabaseVariable::system(
-                                key.clone(),
-                                ScalarValue::Utf8(Some(value.clone())),
-                                None,
-                            ),
-                        );
+                        global_columns_to_update.push(DatabaseVariable::system(
+                            key.to_lowercase(),
+                            ScalarValue::Utf8(Some(value.clone())),
+                            None,
+                        ));
                     } else if is_user_defined_var {
                         let key = key_value.key.value[1..].to_lowercase();
-                        session_columns_to_update.insert(
-                            key.clone(),
-                            DatabaseVariable::user_defined(
-                                key.clone(),
-                                ScalarValue::Utf8(Some(value.clone())),
-                                None,
-                            ),
-                        );
+                        session_columns_to_update.push(DatabaseVariable::user_defined(
+                            key.to_lowercase(),
+                            ScalarValue::Utf8(Some(value.clone())),
+                            None,
+                        ));
                     }
                 }
             }
@@ -2351,6 +2344,7 @@ WHERE `TABLE_SCHEMA` = '{}'",
         if !session_columns_to_update.is_empty() {
             self.state.set_variables(session_columns_to_update);
         }
+
         if !global_columns_to_update.is_empty() {
             self.session_manager
                 .server
@@ -2722,8 +2716,8 @@ mod tests {
     use super::*;
     use crate::{
         sql::{
-            dataframe::batch_to_dataframe, server_manager::ServerConfiguration, types::StatusFlags,
-            AuthContextRef, AuthenticateResponse, HttpAuthContext, ServerManager, SqlAuthService,
+            dataframe::batch_to_dataframe, types::StatusFlags, AuthContextRef,
+            AuthenticateResponse, HttpAuthContext, ServerManager, SqlAuthService,
         },
         transport::{LoadRequestMeta, TransportService},
     };
@@ -2843,12 +2837,11 @@ mod tests {
     }
 
     fn get_test_session(protocol: DatabaseProtocol) -> Arc<Session> {
-        let server = Arc::new(ServerManager {
-            auth: get_test_auth(),
-            transport: get_test_transport(),
-            configuration: ServerConfiguration::default(),
-            nonce: None,
-        });
+        let server = Arc::new(ServerManager::new(
+            get_test_auth(),
+            get_test_transport(),
+            None,
+        ));
 
         let session_manager = Arc::new(SessionManager::new(server.clone()));
         let session = session_manager.create_session(protocol, "127.0.0.1".to_string());
@@ -5790,23 +5783,41 @@ ORDER BY \"COUNT(count)\" DESC"
         query: String,
         db: DatabaseProtocol,
     ) -> Result<(String, StatusFlags), CubeError> {
-        let query =
-            convert_sql_to_cube_query(&query, get_test_tenant_ctx(), get_test_session(db)).await;
-        match query.unwrap() {
-            QueryPlan::DataFusionSelect(flags, plan, ctx) => {
-                let df = DFDataFrame::new(ctx.state, &plan);
-                let batches = df.collect().await?;
-                let frame = batch_to_dataframe(&df.schema().into(), &batches)?;
+        execute_queries_with_flags(vec![query], db).await
+    }
 
-                return Ok((frame.print(), flags));
-            }
-            QueryPlan::MetaTabular(flags, frame) => {
-                return Ok((frame.print(), flags));
-            }
-            QueryPlan::MetaOk(flags, _) => {
-                return Ok(("".to_string(), flags));
+    async fn execute_queries_with_flags(
+        queries: Vec<String>,
+        db: DatabaseProtocol,
+    ) -> Result<(String, StatusFlags), CubeError> {
+        let meta = get_test_tenant_ctx();
+        let session = get_test_session(db);
+
+        let mut output: Vec<String> = Vec::new();
+        let mut output_flags = StatusFlags::empty();
+
+        for query in queries {
+            let query = convert_sql_to_cube_query(&query, meta.clone(), session.clone()).await;
+            match query.unwrap() {
+                QueryPlan::DataFusionSelect(flags, plan, ctx) => {
+                    let df = DFDataFrame::new(ctx.state, &plan);
+                    let batches = df.collect().await?;
+                    let frame = batch_to_dataframe(&df.schema().into(), &batches)?;
+
+                    output.push(frame.print());
+                    output_flags = flags;
+                }
+                QueryPlan::MetaTabular(flags, frame) => {
+                    output.push(frame.print());
+                    output_flags = flags;
+                }
+                QueryPlan::MetaOk(flags, _) => {
+                    output_flags = flags;
+                }
             }
         }
+
+        Ok((output.join("\n").to_string(), output_flags))
     }
 
     #[tokio::test]
@@ -5935,6 +5946,35 @@ ORDER BY \"COUNT(count)\" DESC"
             FROM INFORMATION_SCHEMA.COLUMNS A, INFORMATION_SCHEMA.STATISTICS B
             WHERE A.COLUMN_KEY in ('PRI','pri') AND B.INDEX_NAME='PRIMARY'  AND (ISNULL(database()) OR (A.TABLE_SCHEMA = database())) AND (ISNULL(database()) OR (B.TABLE_SCHEMA = database())) AND A.TABLE_NAME = 'OutlierFingerprints'  AND B.TABLE_NAME = 'OutlierFingerprints'  AND A.TABLE_SCHEMA = B.TABLE_SCHEMA AND A.TABLE_NAME = B.TABLE_NAME AND A.COLUMN_NAME = B.COLUMN_NAME
             ORDER BY A.COLUMN_NAME".to_string(), DatabaseProtocol::MySQL).await?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_redshift_svv_tables() -> Result<(), CubeError> {
+        // This query is used by metabase for introspection
+        insta::assert_snapshot!(
+            "redshift_svv_tables",
+            execute_query(
+                "SELECT * FROM svv_tables ORDER BY table_name DESC".to_string(),
+                DatabaseProtocol::PostgreSQL
+            )
+            .await?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_thought_spot_introspection() -> Result<(), CubeError> {
+        insta::assert_snapshot!(
+            "thought_spot_tables",
+            execute_query(
+                "SELECT * FROM (SELECT CAST(current_database() AS VARCHAR(124)) AS TABLE_CAT, table_schema AS TABLE_SCHEM, table_name AS TABLE_NAME, CAST( CASE table_type WHEN 'BASE TABLE' THEN CASE WHEN table_schema = 'pg_catalog' OR table_schema = 'information_schema' THEN 'SYSTEM TABLE' WHEN table_schema = 'pg_toast' THEN 'SYSTEM TOAST TABLE' WHEN table_schema ~ '^pg_' AND table_schema != 'pg_toast' THEN 'TEMPORARY TABLE' ELSE 'TABLE' END WHEN 'VIEW' THEN CASE WHEN table_schema = 'pg_catalog' OR table_schema = 'information_schema' THEN 'SYSTEM VIEW' WHEN table_schema = 'pg_toast' THEN NULL WHEN table_schema ~ '^pg_' AND table_schema != 'pg_toast' THEN 'TEMPORARY VIEW' ELSE 'VIEW' END WHEN 'EXTERNAL TABLE' THEN 'EXTERNAL TABLE' END AS VARCHAR(124)) AS TABLE_TYPE, REMARKS, '' as TYPE_CAT, '' as TYPE_SCHEM, '' as TYPE_NAME,  '' AS SELF_REFERENCING_COL_NAME, '' AS REF_GENERATION  FROM svv_tables) WHERE true  AND current_database() = 'dev' AND TABLE_TYPE IN ( 'TABLE', 'VIEW', 'EXTERNAL TABLE')  ORDER BY TABLE_TYPE,TABLE_SCHEM,TABLE_NAME ".to_string(),
+                DatabaseProtocol::PostgreSQL
+            )
+            .await?
         );
 
         Ok(())
@@ -6986,6 +7026,19 @@ ORDER BY \"COUNT(count)\" DESC"
                 "++\n++\n++".to_string(),
                 StatusFlags::SERVER_STATE_CHANGED | StatusFlags::AUTOCOMMIT
             )
+        );
+
+        insta::assert_snapshot!(
+            "pg_set_app_show",
+            execute_queries_with_flags(
+                vec![
+                    "set application_name = 'testing app'".to_string(),
+                    "show application_name".to_string()
+                ],
+                DatabaseProtocol::PostgreSQL
+            )
+            .await?
+            .0
         );
 
         Ok(())
@@ -9116,6 +9169,21 @@ ORDER BY \"COUNT(count)\" DESC"
         Ok(())
     }
 
+    // This tests asserts that our DF fork contains support for >> && <<
+    #[tokio::test]
+    async fn df_is_bitwise_shit() -> Result<(), CubeError> {
+        insta::assert_snapshot!(
+            "df_fork_bitwise_shit",
+            execute_query(
+                "SELECT 2 << 10 as t1, 2048 >> 10 as t2;".to_string(),
+                DatabaseProtocol::PostgreSQL
+            )
+            .await?
+        );
+
+        Ok(())
+    }
+
     // This tests asserts that our DF fork contains support for escaped single quoted strings
     #[tokio::test]
     async fn df_escaped_strings() -> Result<(), CubeError> {
@@ -10566,6 +10634,42 @@ ORDER BY \"COUNT(count)\" DESC"
                 }
             );
         }
+
+        let logical_plan = convert_select_to_query_plan(
+            format!(
+                "SELECT \"source\".\"order_date\" AS \"order_date\", \"source\".\"max\" AS \"max\" 
+                FROM (SELECT date_trunc('month', \"KibanaSampleDataEcommerce\".\"order_date\") AS \"order_date\", max(\"KibanaSampleDataEcommerce\".\"maxPrice\") AS \"max\" FROM \"KibanaSampleDataEcommerce\"
+                GROUP BY date_trunc('month', \"KibanaSampleDataEcommerce\".\"order_date\")
+                ORDER BY date_trunc('month', \"KibanaSampleDataEcommerce\".\"order_date\") ASC) \"source\"
+                WHERE (CAST(date_trunc('month', \"source\".\"order_date\") AS timestamp) + (INTERVAL '60 minute')) BETWEEN date_trunc('minute', ({} + (INTERVAL '-30 minute')))
+                AND date_trunc('minute', {})", 
+                now, now
+            ),
+            DatabaseProtocol::PostgreSQL,
+        )
+        .await
+        .as_logical_plan();
+
+        assert_eq!(
+            logical_plan.find_cube_scan().request,
+            V1LoadRequestQuery {
+                measures: Some(vec!["KibanaSampleDataEcommerce.maxPrice".to_string()]),
+                dimensions: Some(vec![]),
+                segments: Some(vec![]),
+                time_dimensions: Some(vec![V1LoadRequestQueryTimeDimension {
+                    dimension: "KibanaSampleDataEcommerce.order_date".to_string(),
+                    granularity: Some("month".to_string()),
+                    date_range: None,
+                }]),
+                order: Some(vec![vec![
+                    "KibanaSampleDataEcommerce.order_date".to_string(),
+                    "asc".to_string(),
+                ]]),
+                limit: None,
+                offset: None,
+                filters: None
+            }
+        );
     }
 
     #[tokio::test]
@@ -10947,5 +11051,31 @@ ORDER BY \"COUNT(count)\" DESC"
                 }
             )
         }
+    }
+
+    #[tokio::test]
+    async fn test_metabase_unwrap_date_cast() {
+        let logical_plan = convert_select_to_query_plan(
+            "SELECT max(CAST(\"KibanaSampleDataEcommerce\".\"order_date\" AS date)) AS \"max\" FROM \"KibanaSampleDataEcommerce\"".to_string(), 
+            DatabaseProtocol::PostgreSQL
+        ).await.as_logical_plan();
+
+        assert_eq!(
+            logical_plan.find_cube_scan().request,
+            V1LoadRequestQuery {
+                measures: Some(vec![]),
+                dimensions: Some(vec![]),
+                segments: Some(vec![]),
+                time_dimensions: Some(vec![V1LoadRequestQueryTimeDimension {
+                    dimension: "KibanaSampleDataEcommerce.order_date".to_owned(),
+                    granularity: Some("month".to_owned()),
+                    date_range: None
+                }]),
+                order: None,
+                limit: None,
+                offset: None,
+                filters: None,
+            }
+        )
     }
 }
